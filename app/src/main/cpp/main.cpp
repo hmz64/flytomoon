@@ -264,22 +264,23 @@ static bool LoadAtlas(AssetPack& pk, const std::string& atlasName, const std::st
     return true;
 }
 
-static const AtlasFrame* AtlasSeq(const std::string& atlas, int seq) {
+static const AtlasFrame* AtlasFrameAt(const std::string& atlas, int idx0) {
     auto it = GAssets.atlases.find(atlas);
     if (it == GAssets.atlases.end() || !it->second.ok) return nullptr;
-    if (seq < 1 || seq > (int)it->second.frames.size()) return nullptr;
-    return &it->second.frames[(size_t)seq - 1];
+    if (idx0 < 0 || idx0 >= (int)it->second.frames.size()) return nullptr;
+    return &it->second.frames[(size_t)idx0];
 }
 static const Atlas* AtlasGet(const std::string& atlas) {
     auto it = GAssets.atlases.find(atlas);
     return it == GAssets.atlases.end() ? nullptr : &it->second;
 }
 
-// Draws atlas sprite centered at `center` (y-down px), rotation clockwise deg.
-static void DrawAtlasSprite(const std::string& atlas, int seq, Vector2 center,
+// Draws atlas sprite centered at `center` (y-down px). idx0 = 0-based frame
+// index (exporter resolves original SeqID by NAME: `{Prefix}_{seq:03d}.png`).
+static void DrawAtlasSprite(const std::string& atlas, int idx0, Vector2 center,
                             float rotDeg, bool flip, Color tint) {
     const Atlas* a = AtlasGet(atlas);
-    const AtlasFrame* f = AtlasSeq(atlas, seq);
+    const AtlasFrame* f = AtlasFrameAt(atlas, idx0);
     if (!a || !a->ok || !f || f->w <= 0 || f->h <= 0) return;
     Rectangle src = { f->x, f->y, f->w, f->h };
     Rectangle dst = { center.x, center.y, f->w, f->h };
@@ -318,11 +319,11 @@ static bool InitAssetPack() {
     const Atlas* ch = AtlasGet("CharActions");
     if (ch) {
         for (int s = 0; states[s]; s++) {
-            std::vector<int> seqs;
+            std::vector<int> idxs;
             for (size_t k = 0; k < ch->frames.size(); k++) {
-                if (ch->frames[k].name.find(states[s]) == 0) seqs.push_back((int)k + 1);
+                if (ch->frames[k].name.find(states[s]) == 0) idxs.push_back((int)k);
             }
-            if (!seqs.empty()) GAssets.kiana[states[s]] = seqs;
+            if (!idxs.empty()) GAssets.kiana[states[s]] = idxs;
         }
     }
     GAssets.ready = AtlasGet("TextureS1") != nullptr || AtlasGet("TextureS3") != nullptr;
@@ -345,9 +346,9 @@ static void DrawKiana(Vector2 pos, float tiltDeg, bool thrusting, bool dead, Vec
     else if (vel.y > 140) st = "charDown";
     else if (!thrusting && fabsf(vel.y) < 40 && fabsf(vel.x) < 40) st = "charIdle";
     else st = "charFree";
-    int seq = KianaSeq(st, t);
-    if (seq < 0) { DrawKianaPlaceholder(pos, tiltDeg, thrusting); return; }
-    DrawAtlasSprite("CharActions", seq, pos, tiltDeg * 0.4f, false, WHITE);
+    int idx = KianaSeq(st, t);
+    if (idx < 0) { DrawKianaPlaceholder(pos, tiltDeg, thrusting); return; }
+    DrawAtlasSprite("CharActions", idx, pos, tiltDeg * 0.4f, false, WHITE);
 }
 
 // -----------------------------------------------------------------------------
@@ -386,9 +387,9 @@ struct Level {
 };
 
 // Imported original level (y-down px, exactly as exported).
-struct Placed { int seq = 0; float x = 0, y = 0, r = 0; bool flip = false; };
-struct DynObj { int seq = 0; float x = 0, y = 0, r = 0; };
-struct ItemObj { int seq = 0; float x = 0, y = 0; };
+struct Placed { int seq = 0; int f = -1; float x = 0, y = 0, r = 0; bool flip = false; };
+struct DynObj { int seq = 0; int f = -1; float x = 0, y = 0, r = 0; };
+struct ItemObj { int seq = 0; int f = -1; float x = 0, y = 0; };
 struct ImportLevel {
     bool ok = false;
     int id = 0, suite = 3;
@@ -435,6 +436,7 @@ static bool LoadImportLevel(int n, ImportLevel& out) {
             const JNode& o = a.arr[i];
             Placed p;
             p.seq = o["s"].intOr(0);
+            p.f = o["f"].intOr(-1);
             p.x = (float)o["x"].numOr(0); p.y = (float)o["y"].numOr(0);
             p.r = (float)o["r"].numOr(0);
             p.flip = o["flip"].type == JNode::BOO && o["flip"].boo;
@@ -446,6 +448,7 @@ static bool LoadImportLevel(int n, ImportLevel& out) {
         const JNode& o = dy.arr[i];
         DynObj d;
         d.seq = o["s"].intOr(0);
+        d.f = o["f"].intOr(-1);
         d.x = (float)o["x"].numOr(0); d.y = (float)o["y"].numOr(0);
         d.r = (float)o["r"].numOr(0);
         out.dyn.push_back(d);
@@ -456,6 +459,7 @@ static bool LoadImportLevel(int n, ImportLevel& out) {
         const JNode& o = it.arr[i];
         ItemObj io;
         io.seq = o["s"].intOr(0);
+        io.f = o["f"].intOr(-1);
         io.x = (float)o["x"].numOr(0); io.y = (float)o["y"].numOr(0);
         out.items.push_back(io);
     }
@@ -722,12 +726,8 @@ static bool ResolveCirclePoly(Vector2& pos, Vector2& vel, float r,
     return hit;
 }
 
-// Item visual: seq 3/4/5 -> InGameUI frames (assumption, see manifest notes).
-static int ItemFrameSeq(int itemSeq) {
-    if (itemSeq == 3) return 10;   // uiCrystalSmall.png
-    if (itemSeq == 5) return 14;   // uiCrystalLarge.png
-    return 6;                      // inLevelStarUp.png (default, incl. seq 4)
-}
+// Item visuals come pre-resolved from the exporter (Item_00N.png in
+// DynamicObjectsLite); no runtime guessing.
 
 // -----------------------------------------------------------------------------
 // 7. APP
@@ -1082,29 +1082,30 @@ int main() {
                 std::string texA = SuiteTexAtlas(ilev.suite), farA = SuiteFarAtlas(ilev.suite);
                 DrawRectangle(-60, -120, (int)levelW + 120, (int)levelH + 240, Color{ 24, 20, 60, 255 });
                 for (size_t i = 0; i < ilev.bac.size(); i++)
-                    DrawAtlasSprite(farA, ilev.bac[i].seq, { ilev.bac[i].x, ilev.bac[i].y }, ilev.bac[i].r, ilev.bac[i].flip, WHITE);
+                    DrawAtlasSprite(farA, ilev.bac[i].f, { ilev.bac[i].x, ilev.bac[i].y }, ilev.bac[i].r, ilev.bac[i].flip, WHITE);
                 for (size_t i = 0; i < ilev.far.size(); i++)
-                    DrawAtlasSprite(farA, ilev.far[i].seq, { ilev.far[i].x, ilev.far[i].y }, ilev.far[i].r, ilev.far[i].flip, WHITE);
+                    DrawAtlasSprite(farA, ilev.far[i].f, { ilev.far[i].x, ilev.far[i].y }, ilev.far[i].r, ilev.far[i].flip, WHITE);
                 for (size_t i = 0; i < ilev.tex.size(); i++)
-                    DrawAtlasSprite(texA, ilev.tex[i].seq, { ilev.tex[i].x, ilev.tex[i].y }, ilev.tex[i].r, ilev.tex[i].flip, WHITE);
+                    DrawAtlasSprite(texA, ilev.tex[i].f, { ilev.tex[i].x, ilev.tex[i].y }, ilev.tex[i].r, ilev.tex[i].flip, WHITE);
                 for (size_t i = 0; i < ilev.items.size(); i++) {
                     if (itemTaken[i]) continue;
-                    DrawAtlasSprite("InGameUI", ItemFrameSeq(ilev.items[i].seq),
+                    DrawAtlasSprite("DynamicObjectsLite", ilev.items[i].f,
                                     { ilev.items[i].x, ilev.items[i].y }, 0, false, WHITE);
                 }
                 for (size_t i = 0; i < ilev.dyn.size(); i++) {
                     if ((int)i == ilev.moonDyn) continue;
-                    DrawAtlasSprite("DynamicObjectsLite", ilev.dyn[i].seq,
+                    DrawAtlasSprite("DynamicObjectsLite", ilev.dyn[i].f,
                                     { ilev.dyn[i].x, ilev.dyn[i].y }, ilev.dyn[i].r, false, WHITE);
                 }
                 // moon gate (dyn sprite + glow)
-                if (ilev.moonDyn >= 0 && ilev.moonDyn < (int)ilev.dyn.size()) {
+                if (ilev.moonDyn >= 0 && ilev.moonDyn < (int)ilev.dyn.size()
+                    && ilev.dyn[(size_t)ilev.moonDyn].f >= 0) {
                     const DynObj& m = ilev.dyn[(size_t)ilev.moonDyn];
                     DrawCircleV(moonPos, moonR + 10 + sinf(animT * 2.0f) * 4.0f, Color{ 200, 200, 255, 80 });
-                    DrawAtlasSprite("DynamicObjectsLite", m.seq, moonPos, 0, false, WHITE);
+                    DrawAtlasSprite("DynamicObjectsLite", m.f, moonPos, 0, false, WHITE);
                 } else DrawMoonPlaceholder(moonPos, moonR, animT);
                 for (size_t i = 0; i < ilev.fore.size(); i++)
-                    DrawAtlasSprite(texA, ilev.fore[i].seq, { ilev.fore[i].x, ilev.fore[i].y }, ilev.fore[i].r, ilev.fore[i].flip, WHITE);
+                    DrawAtlasSprite(texA, ilev.fore[i].f, { ilev.fore[i].x, ilev.fore[i].y }, ilev.fore[i].r, ilev.fore[i].flip, WHITE);
             } else {
                 DrawRectangle(-40, 0, (int)level.width + 80, (int)level.height, Color{ 24, 20, 60, 255 });
                 for (size_t i = 0; i < level.platforms.size(); i++)
