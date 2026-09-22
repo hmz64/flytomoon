@@ -16,7 +16,17 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(raylib)
 
-add_library(flytomoon SHARED main.cpp)
+add_library(flytomoon SHARED
+    main.cpp
+    # NDK glue WAJIB untuk NativeActivity: menyediakan ANativeActivity_onCreate
+    # yang memanggil android_main() milik raylib. Tanpa ini APK install OK
+    # tapi langsung force-close saat dibuka. ANDROID_NDK di-set oleh Gradle.
+    ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c
+)
+
+target_include_directories(flytomoon PRIVATE
+    ${ANDROID_NDK}/sources/android/native_app_glue
+)
 
 target_link_libraries(flytomoon
     raylib
