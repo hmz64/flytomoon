@@ -520,7 +520,7 @@ static Level BuildLevel(int n) {
         AddPlat(lv, 610, 800, 150);
         AddPlat(lv, 380, 560, 200, false);
         lv.stars = { {{280,2320}}, {{700,2120}}, {{480,1900}}, {{250,940}}, {{700,720}} };
-        lv.spikes = { {{{430, 1200, 100, 22}}} };
+        lv.spikes = { {{430, 1200, 100, 22}} };
     } else if (n == 2) {
         lv.name = "Lv.2 Witch's Ascent";
         lv.height = 3600; lv.manaEnabled = true;
@@ -542,7 +542,7 @@ static Level BuildLevel(int n) {
         AddPlat(lv, 200, 800, 150);
         AddPlat(lv, 610, 560, 150);
         lv.stars = { {{480,2440}}, {{250,2200}}, {{710,1980}}, {{480,1480}}, {{250,720}}, {{710,480}} };
-        lv.spikes = { {{{200,1740,120,22}}}, {{{640,980,120,22}}}, {{{400,480,160,22}}} };
+        lv.spikes = { {{200,1740,120,22}}, {{640,980,120,22}}, {{400,480,160,22}} };
     } else if (n == 3) {
         lv.name = "Lv.3 Eclipse Trial";
         lv.height = 4000; lv.manaEnabled = true;
@@ -565,7 +565,7 @@ static Level BuildLevel(int n) {
         AddPlat(lv, 350, 920, 150);
         AddPlat(lv, 600, 660, 160, false);
         lv.stars = { {{630,3320}}, {{220,3100}}, {{660,2120}}, {{220,1620}}, {{480,1370}}, {{680,580}} };
-        lv.spikes = { {{{120,2620,140,22}}}, {{{560,1370,140,22}}}, {{{150,840,140,22}}}};
+        lv.spikes = { {{120,2620,140,22}}, {{560,1370,140,22}}, {{150,840,140,22}} };
     } else {
         lv.name = "Survival: Endless Night";
         lv.height = 6000; lv.manaEnabled = true;
