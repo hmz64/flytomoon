@@ -18,18 +18,18 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Install Android packages (API 34, build-tools, NDK 25, CMake 3.22)
+      - name: Install Android packages (API 34, build-tools, NDK 26, CMake 3.22)
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME"
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
           which sdkmanager
           yes | sdkmanager --licenses || true
-          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;25.2.9519653" "cmake;3.22.1"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> $GITHUB_ENV
           echo "sdk.dir=$ANDROID_HOME" > local.properties
-          echo "ndk.dir=$ANDROID_HOME/ndk/25.2.9519653" >> local.properties
-          ls "$ANDROID_HOME/ndk/25.2.9519653" | head
+          echo "ndk.dir=$ANDROID_HOME/ndk/26.1.10909125" >> local.properties
+          ls "$ANDROID_HOME/ndk/26.1.10909125" | head
 
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v3

@@ -5,6 +5,7 @@ plugins {
 android {
     namespace "com.hmz64.flytomoon"
     compileSdk 34
+    ndkVersion "26.1.10909125"
 
     defaultConfig {
         applicationId "com.hmz64.flytomoon"
