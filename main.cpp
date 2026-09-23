@@ -868,6 +868,38 @@ static void DrawLooseCover(const std::string& name, int sw, int sh) {
                    { 0, 0 }, 0, WHITE);
 }
 
+// Persistent ints (progress, bests, toggles). Desktop: ./flysave.dat,
+// Android: <internalDataPath>/flysave.dat (regular files, fopen works).
+static std::map<int, int> GSave;
+static std::string SavePath() {
+#ifdef __ANDROID__
+    android_app* app = GetAndroidApp();
+    if (app && app->activity && app->activity->internalDataPath)
+        return std::string(app->activity->internalDataPath) + "/flysave.dat";
+#endif
+    return std::string("flysave.dat");
+}
+static void SaveLoad() {
+    GSave.clear();
+    FILE* f = fopen(SavePath().c_str(), "rb");
+    if (!f) return;
+    int k = 0, v = 0;
+    while (fscanf(f, "%d %d", &k, &v) == 2) GSave[k] = v;
+    fclose(f);
+}
+static void SaveFlush() {
+    FILE* f = fopen(SavePath().c_str(), "wb");
+    if (!f) return;
+    for (std::map<int, int>::iterator it = GSave.begin(); it != GSave.end(); ++it)
+        fprintf(f, "%d %d\n", it->first, it->second);
+    fclose(f);
+}
+static int SaveGet(int slot) {
+    std::map<int, int>::iterator it = GSave.find(slot);
+    return it == GSave.end() ? 0 : it->second;
+}
+static void SaveSet(int slot, int val) { GSave[slot] = val; SaveFlush(); }
+
 // Level-select map data + unlock progress (persisted on device).
 struct SelNode { int id = 0; float x = 0, y = 0; int stage = 0; };
 struct SelConn { int a = 0, b = 0; };
@@ -887,7 +919,7 @@ static void LoadSelectData() {
             JNode root = JParser(txt).parse();
             UnloadFileText(txt);
             const JNode& lv = root["levels"];
-            for (std::map<std::string, JNode>::iterator it = lv.obj.begin(); it != lv.obj.end(); ++it) {
+            for (std::map<std::string, JNode>::const_iterator it = lv.obj.begin(); it != lv.obj.end(); ++it) {
                 SelNode n;
                 n.id = atoi(it->first.c_str());
                 n.x = (float)it->second.at(0).numOr(0);
@@ -896,7 +928,7 @@ static void LoadSelectData() {
                 GSelNodes.push_back(n);
             }
             const JNode& co = root["connections"];
-            for (std::map<std::string, JNode>::iterator it = co.obj.begin(); it != co.obj.end(); ++it) {
+            for (std::map<std::string, JNode>::const_iterator it = co.obj.begin(); it != co.obj.end(); ++it) {
                 int st = atoi(it->first.c_str());
                 for (size_t i = 0; i < it->second.arr.size(); i++) {
                     SelConn c;
@@ -913,7 +945,7 @@ static void LoadSelectData() {
         if (txt) {
             JNode root = JParser(txt).parse();
             UnloadFileText(txt);
-            for (std::map<std::string, JNode>::iterator it = root.obj.begin(); it != root.obj.end(); ++it) {
+            for (std::map<std::string, JNode>::const_iterator it = root.obj.begin(); it != root.obj.end(); ++it) {
                 int n = atoi(it->first.c_str());
                 for (size_t i = 0; i < it->second.arr.size(); i++)
                     GDeps[n].push_back(it->second.arr[i].intOr(0));
@@ -921,8 +953,8 @@ static void LoadSelectData() {
         }
     }
     for (int i = 1; i <= 60; i++) {
-        GPassed[i] = LoadStorageValue(2000 + (unsigned)i) > 0 ? 1 : 0;
-        GBest[i] = LoadStorageValue(2100 + (unsigned)i);
+        GPassed[i] = SaveGet(2000 + i) > 0 ? 1 : 0;
+        GBest[i] = SaveGet(2100 + i);
         if (GBest[i] < 0) GBest[i] = 0;
     }
 }
@@ -997,11 +1029,12 @@ int main() {
     int selStage = 3;               // level-select map: current stage tab (1-4)
     int selNode = 1;                // selected node on the map
     bool selRemake = false;         // select screen shows remake list (port extra)
-    bool hasThrust = false;         // for tutorial overlay dismissal
+    SaveLoad();
     LoadSelectData();
+    bool hasThrust = false;         // for tutorial overlay dismissal
     // toggles persisted as ON=2 / OFF=1 (0 = never saved -> default ON)
-    GMusicOn = LoadStorageValue(100) != 1;
-    GSfxOn = LoadStorageValue(101) != 1;
+    GMusicOn = SaveGet(100) != 1;
+    GSfxOn = SaveGet(101) != 1;
     if (packReady && GAudio.hasMenu) MusicStart(GAudio.menu);
 
     Vector2 moonPos = level.moon.pos;
@@ -1123,10 +1156,10 @@ int main() {
                         if (score > bestScore) bestScore = score;
                         if (importNo >= 1 && importNo <= 60) {
                             GPassed[importNo] = 1;
-                            SaveStorageValue(2000 + (unsigned)importNo, 1);
+                            SaveSet(2000 + importNo, 1);
                             if (score > GBest[importNo]) {
                                 GBest[importNo] = score;
-                                SaveStorageValue(2100 + (unsigned)importNo, score);
+                                SaveSet(2100 + importNo, score);
                             }
                         }
                         message = "Stage Clear!"; messageT = 6;
@@ -1480,7 +1513,7 @@ int main() {
                 DrawText(v, (int)(rb.x + rb.width - 90), (int)rb.y + 17, 24, vc);
                 if (TapIn(rb)) {
                     *rows[i].val = !*rows[i].val;
-                    SaveStorageValue(rows[i].key, *rows[i].val ? 2 : 1);
+                    SaveSet(rows[i].key, *rows[i].val ? 2 : 1);
                     if (!GMusicOn && GAudio.hasMenu) StopMusicStream(GAudio.menu);
                     if (GMusicOn && GAudio.hasMenu) MusicStart(GAudio.menu);
                     if (GAudio.hasClick) PlaySfx(GAudio.click);
