@@ -30,6 +30,42 @@
 #include <string>
 #include <vector>
 
+// Raylib 5.5 does NOT hook APK assets to fopen() on Android (InitAssetManager
+// is never called by rcore), so plain FileExists/LoadTexture("fly/...") fails
+// on device and the game silently falls back to placeholders. Fix: route ALL
+// file loads through the APK AssetManager via callbacks (native, no Java).
+#ifdef __ANDROID__
+#include <android/asset_manager.h>
+#include <android_native_app_glue.h>
+static unsigned char* AndroidLoadFileData(const char* fileName, int* dataSize) {
+    if (!fileName || !dataSize) return nullptr;
+    *dataSize = 0;
+    android_app* app = (android_app*)GetAndroidApp();
+    if (!app || !app->activity || !app->activity->assetManager) return nullptr;
+    // AAssetManager wants a relative path without leading slash.
+    while (*fileName == '/') fileName++;
+    AAsset* asset = AAssetManager_open(app->activity->assetManager, fileName, AASSET_MODE_BUFFER);
+    if (!asset) return nullptr;
+    size_t len = AAsset_getLength(asset);
+    unsigned char* data = (unsigned char*)malloc(len + 1);
+    if (!data) { AAsset_close(asset); return nullptr; }
+    int got = AAsset_read(asset, data, len);
+    AAsset_close(asset);
+    if (got < 0) { free(data); return nullptr; }
+    data[got] = 0;
+    *dataSize = got;
+    return data;
+}
+static char* AndroidLoadFileText(const char* fileName) {
+    int n = 0;
+    return (char*)AndroidLoadFileData(fileName, &n);
+}
+static bool AndroidSaveFileData(const char* fileName, void* data, int dataSize) {
+    (void)fileName; (void)data; (void)dataSize;
+    return false;  // APK assets are read-only
+}
+#endif
+
 // -----------------------------------------------------------------------------
 // 1. ORIGINAL TUNING (roleConfig.json, Box2D/SI) + pixel derivatives
 // -----------------------------------------------------------------------------
@@ -232,17 +268,26 @@ static AssetPack GAssets;
 
 static std::string JoinPath(const std::string& a, const std::string& b) { return a + b; }
 
+// Existence check that works on Android APK assets too (FileExists alone
+// uses raw fopen, which cannot see inside the APK).
+static bool AssetExists(const char* path) {
+    if (FileExists(path)) return true;
+    char* t = LoadFileText(path);  // via Android callback when on device
+    if (t) { UnloadFileText(t); return true; }
+    return false;
+}
+
 static bool LoadAtlas(AssetPack& pk, const std::string& atlasName, const std::string& imgFile) {
     std::string jpath = JoinPath(pk.base, std::string("atlas/") + atlasName + ".json");
-    if (!FileExists(jpath.c_str())) return false;
+    if (!AssetExists(jpath.c_str())) return false;
     char* txt = LoadFileText(jpath.c_str());
     if (!txt) return false;
     JNode root = JParser(txt).parse();
     UnloadFileText(txt);
     std::string ipath = JoinPath(pk.base, std::string("tex/") + imgFile);
-    if (!FileExists(ipath.c_str())) {
+    if (!AssetExists(ipath.c_str())) {
         ipath = JoinPath(pk.base, std::string("ui/") + imgFile);
-        if (!FileExists(ipath.c_str())) return false;
+        if (!AssetExists(ipath.c_str())) return false;
     }
     Texture2D t = LoadTexture(ipath.c_str());
     if (t.id == 0) return false;
@@ -274,6 +319,23 @@ static const Atlas* AtlasGet(const std::string& atlas) {
     auto it = GAssets.atlases.find(atlas);
     return it == GAssets.atlases.end() ? nullptr : &it->second;
 }
+// 0-based frame index by sprite name, -1 if missing.
+static int AtlasNameIdx(const std::string& atlas, const std::string& name) {
+    const Atlas* a = AtlasGet(atlas);
+    if (!a) return -1;
+    auto it = a->byName.find(name);
+    if (it == a->byName.end()) return -1;
+    return it->second - 1;
+}
+// Stretched blit (for bars) from an atlas frame.
+static void DrawAtlasStretched(const std::string& atlas, int idx0, Rectangle dst) {
+    const Atlas* a = AtlasGet(atlas);
+    const AtlasFrame* f = AtlasFrameAt(atlas, idx0);
+    if (!a || !a->ok || !f || f->w <= 0 || f->h <= 0) return;
+    Rectangle src = { f->x, f->y, f->w, f->h };
+    if (f->rot) src = { f->x, f->y, f->h, f->w };
+    DrawTexturePro(a->tex, src, dst, { 0, 0 }, 0, WHITE);
+}
 
 // Draws atlas sprite centered at `center` (y-down px). idx0 = 0-based frame
 // index (exporter resolves original SeqID by NAME: `{Prefix}_{seq:03d}.png`).
@@ -298,7 +360,7 @@ static bool InitAssetPack() {
     const char* cands[] = { "fly/", "assets/fly/", "./assets/fly/", "/sdcard/flypack/", nullptr };
     for (int i = 0; cands[i]; i++) {
         std::string probe = std::string(cands[i]) + "manifest.json";
-        if (FileExists(probe.c_str())) { GAssets.base = cands[i]; break; }
+        if (AssetExists(probe.c_str())) { GAssets.base = cands[i]; break; }
     }
     if (GAssets.base.empty()) return false;
     // gameplay atlases (SD)
@@ -416,7 +478,7 @@ static bool LoadImportLevel(int n, ImportLevel& out) {
     if (!GAssets.ready) return false;
     char b[128];
     snprintf(b, sizeof b, "%slevels/level_%03d.json", GAssets.base.c_str(), n);
-    if (!FileExists(b)) return false;
+    if (!AssetExists(b)) return false;
     char* txt = LoadFileText(b);
     if (!txt) return false;
     JNode root = JParser(txt).parse();
@@ -737,6 +799,10 @@ int main() {
     InitWindow(540, 960, "FlyMe2theMoon — Raylib Port (miHoYo 2011 homage)");
     SetTargetFPS(60);
     InitAudioDevice();
+#ifdef __ANDROID__
+    SetLoadFileDataCallback(AndroidLoadFileData);
+    SetLoadFileTextCallback(AndroidLoadFileText);
+#endif
 
     bool packReady = InitAssetPack();
     // SFX mapping: win/death confirmed from Level_*.lua sound.play(); pickup/click best-effort.
@@ -753,13 +819,13 @@ int main() {
         };
         for (size_t i = 0; i < sizeof maps / sizeof maps[0]; i++) {
             std::string p = sb + maps[i].f;
-            if (FileExists(p.c_str())) {
+            if (AssetExists(p.c_str())) {
                 *maps[i].s = LoadSound(p.c_str());
                 *maps[i].ok = true;
             }
         }
         std::string mp = sb + "music/MoonTrip.ogg";
-        if (FileExists(mp.c_str())) { GAudio.menu = LoadMusicStream(mp.c_str()); GAudio.hasMenu = true; }
+        if (AssetExists(mp.c_str())) { GAudio.menu = LoadMusicStream(mp.c_str()); GAudio.hasMenu = true; }
     }
 
     GameState state = GameState::MENU;
@@ -826,7 +892,7 @@ int main() {
                     const char* tr = tracks[(ilev.suite - 1) & 3];
                     std::string p = GAssets.base + tr;
                     if (GAudio.hasStage) { StopMusicStream(GAudio.stage); UnloadMusicStream(GAudio.stage); GAudio.hasStage = false; }
-                    if (FileExists(p.c_str())) {
+                    if (AssetExists(p.c_str())) {
                         GAudio.stage = LoadMusicStream(p.c_str());
                         GAudio.hasStage = true;
                         PlayMusicStream(GAudio.stage);
@@ -965,6 +1031,20 @@ int main() {
         }
         if (IsKeyPressed(KEY_P) || IsKeyPressed(KEY_ESCAPE))
             state = (state == GameState::PLAYING) ? GameState::PAUSED : (state == GameState::PAUSED ? GameState::PLAYING : state);
+        // tappable pause button (top-right); mouse edge + touch edge
+        {
+            static int prevTouchN = 0;
+            int touchN = GetTouchPointCount();
+            Rectangle pb = { (float)sw - 56, 84, 44, 44 };
+            bool tapPb = false;
+            if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && CheckCollisionPointRec(GetMousePosition(), pb)) tapPb = true;
+            if (prevTouchN == 0 && touchN > 0 && CheckCollisionPointRec(GetTouchPosition(0), pb)) tapPb = true;
+            prevTouchN = touchN;
+            if (tapPb && (state == GameState::PLAYING || state == GameState::PAUSED)) {
+                state = (state == GameState::PLAYING) ? GameState::PAUSED : GameState::PLAYING;
+                if (GAudio.hasClick) PlaySound(GAudio.click);
+            }
+        }
         if (messageT > 0) messageT -= frameDt;
 
         if (state == GameState::DEAD || state == GameState::WIN) {
@@ -1005,9 +1085,13 @@ int main() {
             const char* title = "FlyMe2theMoon";
             int tw = MeasureText(title, 56);
             DrawText(title, sw / 2 - tw / 2, (int)(sh * 0.06f), 56, RAYWHITE);
-            std::string sub = packReady ? "original 60-ported + remake  |  Kiana Kaslana"
-                                        : "remake (asset pack not found)  |  Kiana Kaslana";
-            DrawText(sub.c_str(), sw / 2 - MeasureText(sub.c_str(), 16) / 2, (int)(sh * 0.06f) + 66, 16, LIGHTGRAY);
+            char subb[160];
+            if (packReady)
+                snprintf(subb, sizeof subb, "ORIGINAL 60 + remake | atlases %d | %s",
+                         (int)GAssets.atlases.size(), GAssets.base.c_str());
+            else snprintf(subb, sizeof subb, "REMAKE ONLY - fly/ pack NOT found");
+            DrawText(subb, sw / 2 - MeasureText(subb, 16) / 2, (int)(sh * 0.06f) + 66, 16,
+                     packReady ? LIGHTGRAY : ORANGE);
             int y0 = (int)(sh * 0.06f) + 100;
             if (packReady) {
                 const char* tabs[] = { "ORIGINAL 60", "REMAKE" };
@@ -1119,9 +1203,21 @@ int main() {
                 float a = 1.0f - particles[i].life / particles[i].maxLife;
                 DrawCircleV(particles[i].pos, particles[i].size * a + 1, Fade(particles[i].color, a));
             }
-            if (state != GameState::DEAD)
+            if (state != GameState::DEAD) {
                 DrawKiana(player.pos, player.tilt, !pushPoints.empty() && !player.outOfMana,
                           false, player.vel, animT);
+                // jet flame from the original effects atlas (charEffects/ball)
+                if (!pushPoints.empty() && !player.outOfMana && packReady) {
+                    int ball = AtlasNameIdx("CharActions", "charEffects/ball/001.png");
+                    if (ball >= 0) {
+                        float pulse = 1.0f + sinf(animT * 28.0f) * 0.18f;
+                        Vector2 fp = { player.pos.x - player.vel.x * 0.02f,
+                                       player.pos.y + 30.0f * pulse };
+                        DrawAtlasSprite("CharActions", ball, fp, 0, false,
+                                        Color{ 255, 220, 150, 230 });
+                    }
+                }
+            }
             EndMode2D();
 
             DrawRectangle(0, 0, sw / 2, sh, Color{ 255, 255, 255, 8 });
@@ -1140,16 +1236,49 @@ int main() {
             int preview = 40000 + player.stars * 5000;
             Color sc = preview >= 70000 ? MAGENTA : (preview >= 60000 ? ORANGE : RAYWHITE);
             char scb[64]; snprintf(scb, sizeof scb, "Score ~%d  Best %d", preview, bestScore);
-            DrawText(scb, 14, 40, 18, sc);
+            int scx = 14;
+            if (packReady) {
+                int star = AtlasNameIdx("InGameUI", "starUp.png");
+                if (star >= 0) {
+                    DrawAtlasStretched("InGameUI", star, { (float)scx, 37, 22, 22 });
+                    scx += 26;
+                }
+            }
+            DrawText(scb, scx, 40, 18, sc);
             if (manaOn) {
-                DrawRectangle(sw - 264, 14, 250, 22, DARKGRAY);
-                Color mc = player.outOfMana ? RED : (player.mana < 30 ? ORANGE : SKYBLUE);
-                DrawRectangle(sw - 264, 14, (int)(250 * player.mana / Tune::MANA_MAX), 22, mc);
-                DrawRectangleLines(sw - 264, 14, 250, 22, WHITE);
-                DrawText(player.outOfMana ? "OUT OF MANA!" : "MANA", sw - 264, 40, 16,
-                         player.outOfMana ? RED : LIGHTGRAY);
+                int barBg = packReady ? AtlasNameIdx("InGameUI", "manaBar.png") : -1;
+                int barFill = packReady ? AtlasNameIdx("InGameUI", "manaFill1.png") : -1;
+                if (barBg >= 0 && barFill >= 0) {
+                    DrawAtlasStretched("InGameUI", barBg, { (float)sw - 264, 14, 250, 22 });
+                    Color mc = player.outOfMana ? RED : WHITE;
+                    float fw = 250.0f * player.mana / Tune::MANA_MAX;
+                    if (fw > 1) {
+                        const AtlasFrame* ff = AtlasFrameAt("InGameUI", barFill);
+                        Rectangle src = { ff->x, ff->y, ff->w * (fw / 250.0f), ff->h };
+                        Rectangle dst = { (float)sw - 264, 14, fw, 22 };
+                        DrawTexturePro(AtlasGet("InGameUI")->tex, src, dst, { 0, 0 }, 0, mc);
+                    }
+                    if (player.outOfMana) DrawText("OUT OF MANA!", sw - 264, 40, 16, RED);
+                } else {
+                    DrawRectangle(sw - 264, 14, 250, 22, DARKGRAY);
+                    Color mc = player.outOfMana ? RED : (player.mana < 30 ? ORANGE : SKYBLUE);
+                    DrawRectangle(sw - 264, 14, (int)(250 * player.mana / Tune::MANA_MAX), 22, mc);
+                    DrawRectangleLines(sw - 264, 14, 250, 22, WHITE);
+                    DrawText(player.outOfMana ? "OUT OF MANA!" : "MANA", sw - 264, 40, 16,
+                             player.outOfMana ? RED : LIGHTGRAY);
+                }
             }
             DrawText(TextFormat("FPS %d %dx%d", GetFPS(), sw, sh), 14, 58, 14, GRAY);
+            // pause button (original sprite when pack present)
+            {
+                Rectangle pb = { (float)sw - 56, 84, 44, 44 };
+                int pbi = packReady ? AtlasNameIdx("InGameUI", "pauseBtnUp.png") : -1;
+                if (pbi >= 0) DrawAtlasStretched("InGameUI", pbi, pb);
+                else {
+                    DrawRectangleRec(pb, Color{ 0, 0, 0, 120 });
+                    DrawText("II", (int)pb.x + 14, (int)pb.y + 10, 20, WHITE);
+                }
+            }
 
             if (state == GameState::PAUSED) {
                 DrawRectangle(0, 0, sw, sh, Color{ 0, 0, 0, 160 });
