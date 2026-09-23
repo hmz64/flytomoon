@@ -37,6 +37,8 @@
 #ifdef __ANDROID__
 #include <android/asset_manager.h>
 #include <android_native_app_glue.h>
+// Exists in raylib's Android backend (rcore_android.c) but not in raylib.h.
+extern "C" struct android_app *GetAndroidApp(void);
 static unsigned char* AndroidLoadFileData(const char* fileName, int* dataSize) {
     if (!fileName || !dataSize) return nullptr;
     *dataSize = 0;
