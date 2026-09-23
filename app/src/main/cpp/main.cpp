@@ -397,6 +397,7 @@ static bool InitAssetPack() {
     LoadAtlas(GAssets, "MainMenu", "MainMenu.png");
     LoadAtlas(GAssets, "TutorialUI", "TutorialUI.png");
     LoadAtlas(GAssets, "TextImages", "TextImages.png");
+    LoadAtlas(GAssets, "TextImages", "TextImages.png");
     // Kiana animation sets (frame names seen in CharActions.plist)
     const char* states[] = { "charIdle", "charUp", "charDown", "charLeft",
                              "charRight", "charFree", "charStand", "charDeath", nullptr };
