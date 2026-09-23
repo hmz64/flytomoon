@@ -338,16 +338,32 @@ static void DrawAtlasStretched(const std::string& atlas, int idx0, Rectangle dst
     if (f->rot) src = { f->x, f->y, f->h, f->w };
     DrawTexturePro(a->tex, src, dst, { 0, 0 }, 0, WHITE);
 }
+// Centered sprite at fixed screen size (for UI).
+static void DrawAtlasC(const std::string& atlas, int idx0, float cx, float cy, float w, float h) {
+    const Atlas* a = AtlasGet(atlas);
+    const AtlasFrame* f = AtlasFrameAt(atlas, idx0);
+    if (!a || !a->ok || !f || f->w <= 0 || f->h <= 0 || w <= 0 || h <= 0) return;
+    Rectangle src = { f->x, f->y, f->w, f->h };
+    if (f->rot) src = { f->x, f->y, f->h, f->w };
+    DrawTexturePro(a->tex, src, { cx - w / 2.0f, cy - h / 2.0f, w, h }, { 0, 0 }, 0, WHITE);
+}
+// Centered text-sprite at fixed height (aspect kept).
+static void DrawAtlasTextC(const std::string& atlas, int idx0, float cx, float cy, float h) {
+    const AtlasFrame* f = AtlasFrameAt(atlas, idx0);
+    if (!f || f->h <= 0) return;
+    DrawAtlasC(atlas, idx0, cx, cy, h * f->w / f->h, h);
+}
 
 // Draws atlas sprite centered at `center` (y-down px). idx0 = 0-based frame
 // index (exporter resolves original SeqID by NAME: `{Prefix}_{seq:03d}.png`).
 static void DrawAtlasSprite(const std::string& atlas, int idx0, Vector2 center,
-                            float rotDeg, bool flip, Color tint) {
+                            float rotDeg, bool flip, Color tint,
+                            float scX = 1.0f, float scY = 1.0f) {
     const Atlas* a = AtlasGet(atlas);
     const AtlasFrame* f = AtlasFrameAt(atlas, idx0);
     if (!a || !a->ok || !f || f->w <= 0 || f->h <= 0) return;
     Rectangle src = { f->x, f->y, f->w, f->h };
-    Rectangle dst = { center.x, center.y, f->w, f->h };
+    Rectangle dst = { center.x, center.y, f->w * scX, f->h * scY };
     float rot = rotDeg;
     if (f->rot) {  // stored rotated 90 deg in atlas: swap src dims, un-rotate
         src = { f->x, f->y, f->h, f->w };
@@ -377,6 +393,10 @@ static bool InitAssetPack() {
     LoadAtlas(GAssets, "CharActions", "CharActions.png");
     LoadAtlas(GAssets, "DynamicObjectsLite", "DynamicObjectsLite.png");
     LoadAtlas(GAssets, "InGameUI", "InGameUI.png");
+    LoadAtlas(GAssets, "LevelSelect", "LevelSelect.png");
+    LoadAtlas(GAssets, "MainMenu", "MainMenu.png");
+    LoadAtlas(GAssets, "TutorialUI", "TutorialUI.png");
+    LoadAtlas(GAssets, "TextImages", "TextImages.png");
     // Kiana animation sets (frame names seen in CharActions.plist)
     const char* states[] = { "charIdle", "charUp", "charDown", "charLeft",
                              "charRight", "charFree", "charStand", "charDeath", nullptr };
@@ -418,7 +438,32 @@ static void DrawKiana(Vector2 pos, float tiltDeg, bool thrusting, bool dead, Vec
 // -----------------------------------------------------------------------------
 // 5. GAME DATA (remake structs + imported original levels)
 // -----------------------------------------------------------------------------
-enum class GameState { MENU, PLAYING, PAUSED, DEAD, WIN };
+enum class GameState { MENU, SELECT, OPTIONS, SCORES, PLAYING, PAUSED, DEAD, WIN };
+
+// Per-frame tap state (mouse press-edge + first-touch edge), computed once.
+static bool gTapMouse = false, gTapTouch = false;
+static Vector2 gTapPos = { 0, 0 };
+static void UpdateTapState() {
+    static int prevTouchN = 0;
+    int touchN = GetTouchPointCount();
+    gTapMouse = IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
+    gTapTouch = (prevTouchN == 0 && touchN > 0);
+    if (gTapMouse) gTapPos = GetMousePosition();
+    else if (gTapTouch) gTapPos = GetTouchPosition(0);
+    prevTouchN = touchN;
+}
+static bool TapIn(Rectangle rb) {
+    if (gTapMouse && CheckCollisionPointRec(GetMousePosition(), rb)) return true;
+    if (gTapTouch && CheckCollisionPointRec(gTapPos, rb)) return true;
+    return false;
+}
+
+// Audio toggles (persisted) + toast line.
+static bool GMusicOn = true, GSfxOn = true;
+static std::string gToast;
+static float gToastT = 0;
+static void PlaySfx(Sound s) { if (GSfxOn) PlaySound(s); }
+static void MusicStart(Music m) { if (GMusicOn) PlayMusicStream(m); }
 
 struct Platform {
     Rectangle rect = { 0, 0, 0, 0 };
@@ -451,7 +496,7 @@ struct Level {
 };
 
 // Imported original level (y-down px, exactly as exported).
-struct Placed { int seq = 0; int f = -1; float x = 0, y = 0, r = 0; bool flip = false; };
+struct Placed { int seq = 0; int f = -1; float x = 0, y = 0, r = 0; bool flip = false; float sx = 1, sy = 1; };
 struct DynObj { int seq = 0; int f = -1; float x = 0, y = 0, r = 0; };
 struct ItemObj { int seq = 0; int f = -1; float x = 0, y = 0; };
 struct ImportLevel {
@@ -501,6 +546,7 @@ static bool LoadImportLevel(int n, ImportLevel& out) {
             Placed p;
             p.seq = o["s"].intOr(0);
             p.f = o["f"].intOr(-1);
+            p.sx = (float)o["sx"].numOr(1.0); p.sy = (float)o["sy"].numOr(1.0);
             p.x = (float)o["x"].numOr(0); p.y = (float)o["y"].numOr(0);
             p.r = (float)o["r"].numOr(0);
             p.flip = o["flip"].type == JNode::BOO && o["flip"].boo;
@@ -793,6 +839,102 @@ static bool ResolveCirclePoly(Vector2& pos, Vector2& vel, float r,
 // Item visuals come pre-resolved from the exporter (Item_00N.png in
 // DynamicObjectsLite); no runtime guessing.
 
+// Loose PNGs (menus, title, faces): loaded on demand, cached.
+struct LooseTex { Texture2D tex = { 0 }; bool ok = false; };
+static std::map<std::string, LooseTex> GLoose;
+static const LooseTex* Loose(const std::string& name) {
+    auto it = GLoose.find(name);
+    if (it != GLoose.end()) return &it->second;
+    LooseTex lt;
+    const char* dirs[] = { "ui/", "tex/" };
+    for (int i = 0; i < 2; i++) {
+        std::string p = GAssets.base + dirs[i] + name;
+        if (AssetExists(p.c_str())) {
+            lt.tex = LoadTexture(p.c_str());
+            lt.ok = lt.tex.id != 0;
+            break;
+        }
+    }
+    GLoose[name] = lt;
+    return &GLoose[name];
+}
+static void DrawLooseCover(const std::string& name, int sw, int sh) {
+    const LooseTex* t = Loose(name);
+    if (!t || !t->ok) return;
+    float s = fmaxf((float)sw / (float)t->tex.width, (float)sh / (float)t->tex.height);
+    float w = (float)t->tex.width * s, h = (float)t->tex.height * s;
+    DrawTexturePro(t->tex, { 0, 0, (float)t->tex.width, (float)t->tex.height },
+                   { ((float)sw - w) / 2.0f, ((float)sh - h) / 2.0f, w, h },
+                   { 0, 0 }, 0, WHITE);
+}
+
+// Level-select map data + unlock progress (persisted on device).
+struct SelNode { int id = 0; float x = 0, y = 0; int stage = 0; };
+struct SelConn { int a = 0, b = 0; };
+static std::vector<SelNode> GSelNodes;
+static std::map<int, std::vector<SelConn> > GSelConns;  // stage -> conns
+static std::map<int, std::vector<int> > GDeps;
+static bool GSelLoaded = false;
+static int GPassed[61] = { 0 };
+static int GBest[61] = { 0 };
+static void LoadSelectData() {
+    GSelLoaded = true;
+    if (!GAssets.ready) return;
+    std::string p = GAssets.base + "LevelSelectData.json";
+    if (AssetExists(p.c_str())) {
+        char* txt = LoadFileText(p.c_str());
+        if (txt) {
+            JNode root = JParser(txt).parse();
+            UnloadFileText(txt);
+            const JNode& lv = root["levels"];
+            for (std::map<std::string, JNode>::iterator it = lv.obj.begin(); it != lv.obj.end(); ++it) {
+                SelNode n;
+                n.id = atoi(it->first.c_str());
+                n.x = (float)it->second.at(0).numOr(0);
+                n.y = (float)it->second.at(1).numOr(0);
+                n.stage = it->second.at(2).intOr(1);
+                GSelNodes.push_back(n);
+            }
+            const JNode& co = root["connections"];
+            for (std::map<std::string, JNode>::iterator it = co.obj.begin(); it != co.obj.end(); ++it) {
+                int st = atoi(it->first.c_str());
+                for (size_t i = 0; i < it->second.arr.size(); i++) {
+                    SelConn c;
+                    c.a = it->second.arr[i].at(0).intOr(0);
+                    c.b = it->second.arr[i].at(1).intOr(0);
+                    GSelConns[st].push_back(c);
+                }
+            }
+        }
+    }
+    p = GAssets.base + "LevelDependency.json";
+    if (AssetExists(p.c_str())) {
+        char* txt = LoadFileText(p.c_str());
+        if (txt) {
+            JNode root = JParser(txt).parse();
+            UnloadFileText(txt);
+            for (std::map<std::string, JNode>::iterator it = root.obj.begin(); it != root.obj.end(); ++it) {
+                int n = atoi(it->first.c_str());
+                for (size_t i = 0; i < it->second.arr.size(); i++)
+                    GDeps[n].push_back(it->second.arr[i].intOr(0));
+            }
+        }
+    }
+    for (int i = 1; i <= 60; i++) {
+        GPassed[i] = LoadStorageValue(2000 + (unsigned)i) > 0 ? 1 : 0;
+        GBest[i] = LoadStorageValue(2100 + (unsigned)i);
+        if (GBest[i] < 0) GBest[i] = 0;
+    }
+}
+static bool LevelOpen(int n) {
+    if (n <= 1) return true;
+    std::map<int, std::vector<int> >::iterator it = GDeps.find(n);
+    if (it == GDeps.end()) return true;
+    for (size_t i = 0; i < it->second.size(); i++)
+        if (!GPassed[it->second[i]]) return false;
+    return true;
+}
+
 // -----------------------------------------------------------------------------
 // 7. APP
 // -----------------------------------------------------------------------------
@@ -852,9 +994,15 @@ int main() {
     std::string message, levelTitle = level.name;
     float levelW = level.width, levelH = level.height;
     bool manaOn = level.manaEnabled;
-    int menuPage = 0;             // 0 = levels 1-30, 1 = 31-60
-    int menuTab = 0;              // 0 = original 60, 1 = remake
-    if (packReady && GAudio.hasMenu) PlayMusicStream(GAudio.menu);
+    int selStage = 3;               // level-select map: current stage tab (1-4)
+    int selNode = 1;                // selected node on the map
+    bool selRemake = false;         // select screen shows remake list (port extra)
+    bool hasThrust = false;         // for tutorial overlay dismissal
+    LoadSelectData();
+    // toggles persisted as ON=2 / OFF=1 (0 = never saved -> default ON)
+    GMusicOn = LoadStorageValue(100) != 1;
+    GSfxOn = LoadStorageValue(101) != 1;
+    if (packReady && GAudio.hasMenu) MusicStart(GAudio.menu);
 
     Vector2 moonPos = level.moon.pos;
     float moonR = level.moon.radius;
@@ -863,10 +1011,12 @@ int main() {
         float frameDt = GetFrameTime();
         if (frameDt > 0.1f) frameDt = 0.1f;
         animT += frameDt;
-        if (GAudio.hasMenu && state == GameState::MENU) UpdateMusicStream(GAudio.menu);
-        if (GAudio.hasStage && state == GameState::PLAYING) UpdateMusicStream(GAudio.stage);
+        if (GMusicOn && GAudio.hasMenu && (state == GameState::MENU || state == GameState::SELECT || state == GameState::OPTIONS || state == GameState::SCORES)) UpdateMusicStream(GAudio.menu);
+        if (GMusicOn && GAudio.hasStage && state == GameState::PLAYING) UpdateMusicStream(GAudio.stage);
 
         int sw = GetScreenWidth(), sh = GetScreenHeight();
+        UpdateTapState();
+        if (gToastT > 0) gToastT -= frameDt;
         float zoom = (float)sw / Tune::WORLD_W;
         if (zoom < 0.05f) zoom = 0.05f;
         float visH = (float)sh / zoom;
@@ -886,6 +1036,7 @@ int main() {
                     moonR = 48;
                 }
                 particles.clear();
+                hasThrust = false;
                 state = GameState::PLAYING;
                 if (GAudio.hasMenu) StopMusicStream(GAudio.menu);
                 if (packReady) {
@@ -897,7 +1048,7 @@ int main() {
                     if (AssetExists(p.c_str())) {
                         GAudio.stage = LoadMusicStream(p.c_str());
                         GAudio.hasStage = true;
-                        PlayMusicStream(GAudio.stage);
+                        if (GMusicOn) PlayMusicStream(GAudio.stage);
                     }
                 }
             }
@@ -932,6 +1083,7 @@ int main() {
                 pushPoints.push_back({ player.pos.x + 130, player.pos.y + 130 });
             if (IsKeyDown(KEY_W) || IsKeyDown(KEY_UP) || IsKeyDown(KEY_SPACE))
                 pushPoints.push_back({ player.pos.x, player.pos.y + 150 });
+            if (!pushPoints.empty()) hasThrust = true;
         }
 
         if (state == GameState::PLAYING) {
@@ -950,7 +1102,7 @@ int main() {
                         Vector2 ip = { ilev.items[i].x, ilev.items[i].y };
                         if (CheckCollisionCircles(player.pos, Tune::PLAYER_R + 4, ip, 18)) {
                             itemTaken[i] = 1; player.stars++;
-                            if (GAudio.hasPickup) PlaySound(GAudio.pickup);
+                            if (GAudio.hasPickup) PlaySfx(GAudio.pickup);
                             for (int k = 0; k < 10; k++) {
                                 Particle pt;
                                 pt.pos = ip;
@@ -963,14 +1115,22 @@ int main() {
                     if (player.pos.y > levelH + 80 || player.pos.y < -400) {
                         state = GameState::DEAD; player.deadTimer = 0;
                         message = "Kiana fell! Tap / R to retry"; messageT = 4;
-                        if (GAudio.hasDeath) PlaySound(GAudio.death);
+                        if (GAudio.hasDeath) PlaySfx(GAudio.death);
                     }
                     if (CheckCollisionCircles(player.pos, Tune::PLAYER_R, moonPos, moonR)) {
                         state = GameState::WIN;
                         score = 40000 + player.stars * 5000 + (int)fmaxf(0, (ilev.par * 4.0f - player.time)) * 800;
                         if (score > bestScore) bestScore = score;
+                        if (importNo >= 1 && importNo <= 60) {
+                            GPassed[importNo] = 1;
+                            SaveStorageValue(2000 + (unsigned)importNo, 1);
+                            if (score > GBest[importNo]) {
+                                GBest[importNo] = score;
+                                SaveStorageValue(2100 + (unsigned)importNo, score);
+                            }
+                        }
                         message = "Stage Clear!"; messageT = 6;
-                        if (GAudio.hasWin) PlaySound(GAudio.win);
+                        if (GAudio.hasWin) PlaySfx(GAudio.win);
                     }
                 } else {
                     for (size_t i = 0; i < level.platforms.size(); i++)
@@ -981,7 +1141,7 @@ int main() {
                     for (size_t i = 0; i < level.stars.size(); i++) {
                         if (!level.stars[i].taken && CheckCollisionCircles(player.pos, Tune::PLAYER_R + 4, level.stars[i].pos, 16)) {
                             level.stars[i].taken = true; player.stars++;
-                            if (GAudio.hasPickup) PlaySound(GAudio.pickup);
+                            if (GAudio.hasPickup) PlaySfx(GAudio.pickup);
                         }
                     }
                     for (size_t i = 0; i < level.spikes.size(); i++) {
@@ -990,14 +1150,14 @@ int main() {
                         if (CheckCollisionCircleRec(player.pos, Tune::PLAYER_R - 3, inner)) {
                             state = GameState::DEAD; player.deadTimer = 0;
                             message = "Kiana crashed! Tap / R to retry"; messageT = 4;
-                            if (GAudio.hasDeath) PlaySound(GAudio.death);
+                            if (GAudio.hasDeath) PlaySfx(GAudio.death);
                             break;
                         }
                     }
                     if (player.pos.y > level.height + 80) {
                         state = GameState::DEAD; player.deadTimer = 0;
                         message = "Kiana fell! Tap / R to retry"; messageT = 4;
-                        if (GAudio.hasDeath) PlaySound(GAudio.death);
+                        if (GAudio.hasDeath) PlaySfx(GAudio.death);
                     }
                     if (CheckCollisionCircles(player.pos, Tune::PLAYER_R, level.moon.pos, level.moon.radius)) {
                         state = GameState::WIN;
@@ -1005,7 +1165,7 @@ int main() {
                         score = 40000 + player.stars * 5000 + (int)fmaxf(0, (par * 4.0f - player.time)) * 800;
                         if (score > bestScore) bestScore = score;
                         message = "Stage Clear!"; messageT = 6;
-                        if (GAudio.hasWin) PlaySound(GAudio.win);
+                        if (GAudio.hasWin) PlaySfx(GAudio.win);
                     }
                 }
                 accumulator -= FIXED_DT; steps++;
@@ -1022,29 +1182,25 @@ int main() {
             else i++;
         }
 
-        if (IsKeyPressed(KEY_R) && state != GameState::MENU) {
+        bool inGame = (state == GameState::PLAYING || state == GameState::PAUSED ||
+                       state == GameState::DEAD || state == GameState::WIN);
+        if (IsKeyPressed(KEY_R) && inGame) {
             if (useImport) startImport(importNo);
             else startRemake(remakeNo);
         }
         if (IsKeyPressed(KEY_M)) {
             state = GameState::MENU;
             if (GAudio.hasStage) { StopMusicStream(GAudio.stage); GAudio.hasStage = false; }
-            if (GAudio.hasMenu) PlayMusicStream(GAudio.menu);
+            if (GAudio.hasMenu) MusicStart(GAudio.menu);
         }
         if (IsKeyPressed(KEY_P) || IsKeyPressed(KEY_ESCAPE))
             state = (state == GameState::PLAYING) ? GameState::PAUSED : (state == GameState::PAUSED ? GameState::PLAYING : state);
-        // tappable pause button (top-right); mouse edge + touch edge
+        // tappable pause button (top-right)
         {
-            static int prevTouchN = 0;
-            int touchN = GetTouchPointCount();
             Rectangle pb = { (float)sw - 56, 84, 44, 44 };
-            bool tapPb = false;
-            if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && CheckCollisionPointRec(GetMousePosition(), pb)) tapPb = true;
-            if (prevTouchN == 0 && touchN > 0 && CheckCollisionPointRec(GetTouchPosition(0), pb)) tapPb = true;
-            prevTouchN = touchN;
-            if (tapPb && (state == GameState::PLAYING || state == GameState::PAUSED)) {
+            if (TapIn(pb) && (state == GameState::PLAYING || state == GameState::PAUSED)) {
                 state = (state == GameState::PLAYING) ? GameState::PAUSED : GameState::PLAYING;
-                if (GAudio.hasClick) PlaySound(GAudio.click);
+                if (GAudio.hasClick) PlaySfx(GAudio.click);
             }
         }
         if (messageT > 0) messageT -= frameDt;
@@ -1065,7 +1221,9 @@ int main() {
         Vector2 desired = player.pos;
         desired.y -= 60;
         static Vector2 camSm = { 480, 2800 };
-        if (state == GameState::MENU) camSm = { 480, 1500 };
+        bool inMenu = (state == GameState::MENU || state == GameState::SELECT ||
+                       state == GameState::OPTIONS || state == GameState::SCORES);
+        if (inMenu) camSm = { 480, 1500 };
         else {
             camSm.x += (desired.x - camSm.x) * ClampF(6 * frameDt, 0, 1);
             camSm.y += (desired.y - camSm.y) * ClampF(5 * frameDt, 0, 1);
@@ -1076,7 +1234,7 @@ int main() {
         camSm.y = ClampF(camSm.y, minCamY, maxCamY);
         if (levelW <= visW) camSm.x = levelW / 2.0f;
         else camSm.x = ClampF(camSm.x, halfW - 40, levelW - halfW + 40);
-        cam.target = (state == GameState::MENU) ? Vector2{ 480, 1500 } : camSm;
+        cam.target = inMenu ? Vector2{ 480, 1500 } : camSm;
         cam.offset = { (float)sw / 2.0f, (float)sh / 2.0f };
         cam.zoom = zoom;
 
@@ -1084,78 +1242,294 @@ int main() {
         ClearBackground(Color{ 12, 10, 35, 255 });
 
         if (state == GameState::MENU) {
-            const char* title = "FlyMe2theMoon";
-            int tw = MeasureText(title, 56);
-            DrawText(title, sw / 2 - tw / 2, (int)(sh * 0.06f), 56, RAYWHITE);
-            char subb[160];
-            if (packReady)
-                snprintf(subb, sizeof subb, "ORIGINAL 60 + remake | atlases %d | %s",
-                         (int)GAssets.atlases.size(), GAssets.base.c_str());
-            else snprintf(subb, sizeof subb, "REMAKE ONLY - fly/ pack NOT found");
-            DrawText(subb, sw / 2 - MeasureText(subb, 16) / 2, (int)(sh * 0.06f) + 66, 16,
-                     packReady ? LIGHTGRAY : ORANGE);
-            int y0 = (int)(sh * 0.06f) + 100;
-            if (packReady) {
-                const char* tabs[] = { "ORIGINAL 60", "REMAKE" };
-                for (int i = 0; i < 2; i++) {
-                    Rectangle rb = { (float)sw / 2 - 220 + (float)i * 220, (float)y0, 210, 36 };
-                    bool hov = CheckCollisionPointRec(GetMousePosition(), rb);
-                    DrawRectangleRec(rb, (menuTab == i) ? Color{ 70, 60, 140, 255 } : Color{ 25, 25, 55, 255 });
-                    DrawText(tabs[i], (int)(rb.x + 105 - MeasureText(tabs[i], 18) / 2), (int)rb.y + 9, 18, hov ? YELLOW : RAYWHITE);
-                    if (hov && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
-                        menuTab = i;
-                        if (GAudio.hasClick) PlaySound(GAudio.click);
-                    }
-                }
-                y0 += 48;
-            } else menuTab = 1;
-            if (menuTab == 0 && packReady) {
-                int cols = 6, per = 30;
-                int start = menuPage * per;
-                for (int i = 0; i < per; i++) {
-                    int n = start + i + 1;
-                    if (n > 60) break;
-                    int cx = i % cols, cy = i / cols;
-                    Rectangle rb = { (float)sw / 2 - 300 + (float)cx * 102, (float)y0 + (float)cy * 46, 94, 38 };
-                    bool hov = CheckCollisionPointRec(GetMousePosition(), rb);
-                    char b[16]; snprintf(b, sizeof b, "%d", n);
-                    DrawRectangleRec(rb, hov ? Color{ 60, 50, 120, 255 } : Color{ 22, 22, 50, 255 });
-                    DrawText(b, (int)(rb.x + 47 - MeasureText(b, 20) / 2), (int)rb.y + 9, 20, hov ? YELLOW : RAYWHITE);
-                    if (hov && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
-                        if (GAudio.hasClick) PlaySound(GAudio.click);
-                        startImport(n);
-                    }
-                }
-                const char* pg = menuPage == 0 ? "31-60 >>" : "<< 1-30";
-                Rectangle pb = { (float)sw / 2 - 80, (float)y0 + 5 * 46 + 6, 160, 32 };
-                bool hov = CheckCollisionPointRec(GetMousePosition(), pb);
-                DrawRectangleRec(pb, Color{ 25, 25, 55, 255 });
-                DrawText(pg, (int)(pb.x + 80 - MeasureText(pg, 16) / 2), (int)pb.y + 8, 16, hov ? YELLOW : LIGHTGRAY);
-                if (hov && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) menuPage = 1 - menuPage;
+            float ds = (float)sw / 320.0f;
+            DrawLooseCover("mainBg2.png", sw, sh);
+            const LooseTex* ttl = Loose("mainTitle2.png");
+            if (ttl && ttl->ok) {
+                float tw2 = 300.0f * ds;
+                float th2 = tw2 * (float)ttl->tex.height / (float)ttl->tex.width;
+                DrawTexturePro(ttl->tex, { 0, 0, (float)ttl->tex.width, (float)ttl->tex.height },
+                               { ((float)sw - tw2) / 2.0f, sh * 0.06f, tw2, th2 }, { 0, 0 }, 0, WHITE);
             } else {
+                const char* t = "FlyMe2theMoon";
+                DrawText(t, sw / 2 - MeasureText(t, 44) / 2, (int)(sh * 0.07f), 44, RAYWHITE);
+            }
+            int kidle = KianaSeq("charStand", animT);
+            if (kidle < 0) kidle = KianaSeq("charIdle", animT);
+            if (kidle >= 0)
+                DrawAtlasSprite("CharActions", kidle, { (float)sw * 0.5f, sh * 0.35f }, 0, false, WHITE, 1.5f, 1.5f);
+            struct MenuBtn { const char* img; GameState go; int tag; };
+            MenuBtn mbs[] = {
+                { "mainMenu/playText.png", GameState::SELECT, 0 },
+                { "mainMenu/optsText.png", GameState::OPTIONS, 0 },
+                { "mainMenu/scoresText.png", GameState::SCORES, 0 },
+                { "mainMenu/achievementsTextUp.png", GameState::MENU, 1 },
+            };
+            float bw = 240.0f * ds, bh = 58.0f * ds;
+            float by = sh * 0.48f;
+            for (int i = 0; i < 4; i++) {
+                Rectangle rb = { ((float)sw - bw) / 2.0f, by + (float)i * (bh + 9.0f * ds), bw, bh };
+                int up = AtlasNameIdx("MainMenu", "mainMenuBtnUp.png");
+                int dn = AtlasNameIdx("MainMenu", "mainMenuBtnDown.png");
+                bool hov = CheckCollisionPointRec(GetMousePosition(), rb);
+                if (up >= 0) DrawAtlasStretched("MainMenu", hov ? dn : up, rb);
+                else DrawRectangleRec(rb, hov ? Color{ 60, 50, 120, 255 } : Color{ 22, 22, 50, 255 });
+                int ti = AtlasNameIdx("TextImages", mbs[i].img);
+                if (ti >= 0) DrawAtlasTextC("TextImages", ti, rb.x + rb.width / 2.0f, rb.y + rb.height / 2.0f, bh * 0.48f);
+                if (TapIn(rb)) {
+                    if (GAudio.hasClick) PlaySfx(GAudio.click);
+                    if (mbs[i].tag == 1) { gToast = "Online features unavailable in this port"; gToastT = 2.5f; }
+                    else if (mbs[i].go == GameState::SELECT && !packReady) { gToast = "Asset pack missing"; gToastT = 2.5f; }
+                    else {
+                        if (mbs[i].go == GameState::SELECT) {
+                            selStage = 1; selNode = 1; selRemake = false;
+                            for (int n = 1; n <= 60; n++) {
+                                if (!GPassed[n]) {
+                                    for (size_t k = 0; k < GSelNodes.size(); k++) {
+                                        if (GSelNodes[k].id == n) { selStage = GSelNodes[k].stage; selNode = n; }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        state = mbs[i].go;
+                    }
+                }
+            }
+            // port-extra remake shortcut (small text button)
+            {
+                Rectangle rb = { ((float)sw - bw) / 2.0f, by + 4.0f * (bh + 9.0f * ds), bw, 30 };
+                bool hov = CheckCollisionPointRec(GetMousePosition(), rb);
+                DrawText("REMAKE LEVELS", (int)(rb.x + rb.width / 2 - MeasureText("REMAKE LEVELS", 15) / 2), (int)rb.y + 7, 15, hov ? YELLOW : GRAY);
+                if (TapIn(rb)) {
+                    if (GAudio.hasClick) PlaySfx(GAudio.click);
+                    selRemake = true;
+                    state = GameState::SELECT;
+                }
+            }
+            int tapTi = AtlasNameIdx("TextImages", "mainMenu/tapBtn.png");
+            if (tapTi >= 0) DrawAtlasTextC("TextImages", tapTi, (float)sw / 2.0f, sh - 64.0f, 18.0f);
+            else DrawText("tap a button to begin", sw / 2 - MeasureText("tap a button to begin", 15) / 2, sh - 64, 15, GRAY);
+            if (gToastT > 0) {
+                DrawText(gToast.c_str(), sw / 2 - MeasureText(gToast.c_str(), 16) / 2, sh - 36, 16, YELLOW);
+            }
+            if (!packReady) {
+                const char* w = "fly/ asset pack not found";
+                DrawText(w, sw / 2 - MeasureText(w, 15) / 2, sh - 92, 15, ORANGE);
+            }
+        } else if (state == GameState::SELECT) {
+            float ds = (float)sw / 320.0f;
+            DrawLooseCover("mainBg2.png", sw, sh);
+            // back button (top-left)
+            {
+                int bk = AtlasNameIdx("LevelSelect", "retBtn1Up.png");
+                int bt = AtlasNameIdx("TextImages", "lvlSel/backText.png");
+                Rectangle rb = { 10, 10, 110, 40 };
+                if (bk >= 0) DrawAtlasC("LevelSelect", bk, rb.x + 27, rb.y + 20, 52, 24);
+                if (bt >= 0) DrawAtlasTextC("TextImages", bt, rb.x + 72, rb.y + 20, 20);
+                else DrawText("BACK", (int)rb.x + 56, (int)rb.y + 12, 18, RAYWHITE);
+                if (TapIn(rb)) {
+                    if (GAudio.hasClick) PlaySfx(GAudio.click);
+                    state = GameState::MENU;
+                }
+            }
+            if (!packReady || GSelNodes.empty() || selRemake) {
+                // fallback: remake list (also when pack absent)
                 const char* opts[] = { "R1 Moonlit Beginning", "R2 Witch's Ascent",
                                        "R3 Eclipse Trial", "R4 Survival Endless" };
+                DrawText("REMAKE", sw / 2 - MeasureText("REMAKE", 26) / 2, 60, 26, RAYWHITE);
                 for (int i = 0; i < 4; i++) {
-                    int y = y0 + i * 52;
-                    Rectangle rb = { (float)sw / 2 - 300, (float)y - 8, 600, 40 };
+                    int y = 130 + i * 56;
+                    Rectangle rb = { (float)sw / 2 - 280, (float)y - 8, 560, 42 };
+                    if (rb.width > (float)sw - 32) { rb.width = (float)sw - 32; rb.x = 16; }
                     bool hov = CheckCollisionPointRec(GetMousePosition(), rb);
                     DrawRectangleRec(rb, hov ? Color{ 40, 40, 80, 255 } : Color{ 22, 22, 50, 255 });
-                    DrawText(opts[i], sw / 2 - 280, y, 20, hov ? YELLOW : RAYWHITE);
-                    if (hov && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
-                        if (GAudio.hasClick) PlaySound(GAudio.click);
+                    DrawText(opts[i], (int)rb.x + 20, y, 20, hov ? YELLOW : RAYWHITE);
+                    if (TapIn(rb)) {
+                        if (GAudio.hasClick) PlaySfx(GAudio.click);
                         startRemake(i + 1);
                     }
                 }
+            } else {
+                // stage banner
+                char sbn[32];
+                snprintf(sbn, sizeof sbn, "lvlSel/stage%d.png", selStage);
+                int banner = AtlasNameIdx("LevelSelect", sbn);
+                if (banner >= 0) DrawAtlasC("LevelSelect", banner, (float)sw / 2.0f, 34, 150, 46);
+                else {
+                    char t2[32]; snprintf(t2, sizeof t2, "STAGE %d", selStage);
+                    DrawText(t2, sw / 2 - MeasureText(t2, 24) / 2, 20, 24, RAYWHITE);
+                }
+                // map area + node transform (data assumed y-up -> flip)
+                float rx = 16, ry = 70, rw = (float)sw - 32, rh = (float)sh - 70 - 130;
+                float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
+                int cnt = 0;
+                for (size_t i = 0; i < GSelNodes.size(); i++) {
+                    if (GSelNodes[i].stage != selStage) continue;
+                    if (GSelNodes[i].x < minX) minX = GSelNodes[i].x;
+                    if (GSelNodes[i].x > maxX) maxX = GSelNodes[i].x;
+                    if (GSelNodes[i].y < minY) minY = GSelNodes[i].y;
+                    if (GSelNodes[i].y > maxY) maxY = GSelNodes[i].y;
+                    cnt++;
+                }
+                if (cnt > 0) {
+                    float s = fminf(rw / (maxX - minX + 120.0f), rh / (maxY - minY + 120.0f));
+                    if (s < 0.15f) s = 0.15f;
+                    float cx = (minX + maxX) / 2.0f, cy = (minY + maxY) / 2.0f;
+                    // connections
+                    std::map<int, SelNode*> byId;
+                    for (size_t i = 0; i < GSelNodes.size(); i++)
+                        if (GSelNodes[i].stage == selStage) byId[GSelNodes[i].id] = &GSelNodes[i];
+                    std::vector<SelConn>& conns = GSelConns[selStage];
+                    for (size_t i = 0; i < conns.size(); i++) {
+                        if (!byId.count(conns[i].a) || !byId.count(conns[i].b)) continue;
+                        SelNode* a = byId[conns[i].a];
+                        SelNode* b = byId[conns[i].b];
+                        Vector2 pa = { rx + rw / 2.0f + (a->x - cx) * s, ry + rh / 2.0f - (a->y - cy) * s };
+                        Vector2 pb2 = { rx + rw / 2.0f + (b->x - cx) * s, ry + rh / 2.0f - (b->y - cy) * s };
+                        DrawLineEx(pa, pb2, 3, Color{ 255, 255, 255, 90 });
+                    }
+                    int ring = AtlasNameIdx("LevelSelect", "lvlSel/levelBtnRing.png");
+                    int lock = AtlasNameIdx("LevelSelect", "lvlSel/levelBtnLock.png");
+                    int shine = AtlasNameIdx("LevelSelect", "lvlSel/levelStarShine.png");
+                    int starY = AtlasNameIdx("LevelSelect", "lvlSel/starUpY.png");
+                    int starO = AtlasNameIdx("LevelSelect", "lvlSel/starUpO.png");
+                    int starP = AtlasNameIdx("LevelSelect", "lvlSel/starUpP.png");
+                    for (size_t i = 0; i < GSelNodes.size(); i++) {
+                        if (GSelNodes[i].stage != selStage) continue;
+                        float nx = rx + rw / 2.0f + (GSelNodes[i].x - cx) * s;
+                        float ny = ry + rh / 2.0f - (GSelNodes[i].y - cy) * s;
+                        bool open = LevelOpen(GSelNodes[i].id);
+                        if (GSelNodes[i].id == selNode && shine >= 0)
+                            DrawAtlasC("LevelSelect", shine, nx, ny, 64, 64);
+                        if (open) {
+                            if (ring >= 0) DrawAtlasC("LevelSelect", ring, nx, ny, 58, 58);
+                            else DrawCircleV({ nx, ny }, 26, DARKBLUE);
+                            char nb[16]; snprintf(nb, sizeof nb, "%d", GSelNodes[i].id);
+                            DrawText(nb, (int)nx - MeasureText(nb, 20) / 2, (int)ny - 10, 20, WHITE);
+                            int tiers = 0;
+                            if (GPassed[GSelNodes[i].id]) tiers = 1;
+                            if (GBest[GSelNodes[i].id] >= 60000) tiers = 2;
+                            if (GBest[GSelNodes[i].id] >= 70000) tiers = 3;
+                            int sids[] = { starY, starO, starP };
+                            for (int st = 0; st < tiers; st++)
+                                if (sids[st] >= 0) DrawAtlasC("LevelSelect", sids[st], nx - 22.0f + (float)st * 22.0f, ny - 40.0f, 20, 20);
+                        } else {
+                            if (lock >= 0) DrawAtlasC("LevelSelect", lock, nx, ny, 30, 40);
+                            else DrawCircleV({ nx, ny }, 22, GRAY);
+                        }
+                        Rectangle hit = { nx - 34, ny - 34, 68, 68 };
+                        if (TapIn(hit) && open) {
+                            if (GAudio.hasClick) PlaySfx(GAudio.click);
+                            selNode = GSelNodes[i].id;
+                        }
+                    }
+                    // stage arrows
+                    int tu = AtlasNameIdx("LevelSelect", "lvlSel/turnBtnUp.png");
+                    Rectangle la = { 2, ry + rh / 2.0f - 40, 56, 80 };
+                    Rectangle ra = { (float)sw - 58, ry + rh / 2.0f - 40, 56, 80 };
+                    if (tu >= 0) {
+                        DrawAtlasC("LevelSelect", tu, la.x + 28, la.y + 40, 44, 66);
+                        DrawAtlasC("LevelSelect", tu, ra.x + 28, ra.y + 40, 44, 66);
+                    }
+                    if (TapIn(la)) { selStage = selStage <= 1 ? 4 : selStage - 1; if (GAudio.hasClick) PlaySfx(GAudio.click); }
+                    if (TapIn(ra)) { selStage = selStage >= 4 ? 1 : selStage + 1; if (GAudio.hasClick) PlaySfx(GAudio.click); }
+                    // bottom panel: info + START
+                    int panel = AtlasNameIdx("LevelSelect", "lvlSel/levelPanel.png");
+                    Rectangle pr = { 16, (float)sh - 118, (float)sw - 32, 106 };
+                    if (panel >= 0) DrawAtlasStretched("LevelSelect", panel, pr);
+                    else DrawRectangleRec(pr, Color{ 0, 0, 0, 160 });
+                    char li[64];
+                    snprintf(li, sizeof li, "LEVEL %d%s", selNode, LevelOpen(selNode) ? "" : " (LOCKED)");
+                    DrawText(li, (int)pr.x + 18, (int)pr.y + 12, 22, RAYWHITE);
+                    if (GBest[selNode] > 0) {
+                        char bb[64]; snprintf(bb, sizeof bb, "BEST %d", GBest[selNode]);
+                        DrawText(bb, (int)pr.x + 18, (int)pr.y + 42, 18, GOLD);
+                    } else DrawText("NOT CLEARED", (int)pr.x + 18, (int)pr.y + 42, 18, GRAY);
+                    int btnU = AtlasNameIdx("LevelSelect", "lvlSel/btnUp.png");
+                    int stx = AtlasNameIdx("TextImages", "lvlSel/startText.png");
+                    Rectangle sr = { pr.x + pr.width - 160, pr.y + 22, 142, 60 };
+                    if (btnU >= 0) DrawAtlasStretched("LevelSelect", btnU, sr);
+                    else DrawRectangleRec(sr, Color{ 40, 90, 40, 255 });
+                    if (stx >= 0) DrawAtlasTextC("TextImages", stx, sr.x + sr.width / 2.0f, sr.y + sr.height / 2.0f, 24);
+                    else DrawText("START", (int)sr.x + 40, (int)sr.y + 20, 20, WHITE);
+                    if (TapIn(sr) && LevelOpen(selNode)) {
+                        if (GAudio.hasClick) PlaySfx(GAudio.click);
+                        startImport(selNode);
+                    }
+                }
             }
-            const char* help = "LEFT half = up-right  |  RIGHT half = up-left  |  A D W / touch / mouse";
-            DrawText(help, sw / 2 - MeasureText(help, 15) / 2, sh - 52, 15, GRAY);
-            if (bestScore > 0) {
-                char b[64]; snprintf(b, sizeof b, "BEST %d", bestScore);
-                DrawText(b, sw / 2 - MeasureText(b, 22) / 2, sh - 30, 22, GOLD);
+            if (gToastT > 0)
+                DrawText(gToast.c_str(), sw / 2 - MeasureText(gToast.c_str(), 16) / 2, sh - 36, 16, YELLOW);
+        } else if (state == GameState::OPTIONS) {
+            DrawLooseCover("mainBg2.png", sw, sh);
+            DrawText("OPTIONS", sw / 2 - MeasureText("OPTIONS", 30) / 2, 60, 30, RAYWHITE);
+            struct OptRow { const char* onImg; const char* offImg; bool* val; int key; };
+            OptRow rows[] = {
+                { "options/musicOnText.png", "options/musicOffText.png", &GMusicOn, 100 },
+                { "options/soundOnText.png", "options/soundOffText.png", &GSfxOn, 101 },
+            };
+            for (int i = 0; i < 2; i++) {
+                Rectangle rb = { (float)sw / 2 - 220, 150.0f + (float)i * 70, 440, 56 };
+                if (rb.width > (float)sw - 32) { rb.width = (float)sw - 32; rb.x = 16; }
+                DrawRectangleRec(rb, Color{ 22, 22, 50, 220 });
+                int ti = AtlasNameIdx("TextImages", *rows[i].val ? rows[i].onImg : rows[i].offImg);
+                if (ti >= 0) DrawAtlasTextC("TextImages", ti, rb.x + 110, rb.y + 28, 24);
+                const char* v = *rows[i].val ? "ON" : "OFF";
+                Color vc = *rows[i].val ? GREEN : RED;
+                DrawText(v, (int)(rb.x + rb.width - 90), (int)rb.y + 17, 24, vc);
+                if (TapIn(rb)) {
+                    *rows[i].val = !*rows[i].val;
+                    SaveStorageValue(rows[i].key, *rows[i].val ? 2 : 1);
+                    if (!GMusicOn && GAudio.hasMenu) StopMusicStream(GAudio.menu);
+                    if (GMusicOn && GAudio.hasMenu) MusicStart(GAudio.menu);
+                    if (GAudio.hasClick) PlaySfx(GAudio.click);
+                }
             }
-            if (!packReady) {
-                const char* w = "fly/ asset pack not found — remake only";
-                DrawText(w, sw / 2 - MeasureText(w, 15) / 2, sh - 74, 15, ORANGE);
+            {
+                int bk = AtlasNameIdx("TextImages", "options/backText.png");
+                Rectangle rb = { (float)sw / 2 - 110, 150.0f + 2.0f * 70, 220, 56 };
+                DrawRectangleRec(rb, Color{ 22, 22, 50, 220 });
+                if (bk >= 0) DrawAtlasTextC("TextImages", bk, rb.x + rb.width / 2.0f, rb.y + 28, 24);
+                else DrawText("BACK", (int)rb.x + 70, (int)rb.y + 17, 24, WHITE);
+                if (TapIn(rb)) {
+                    if (GAudio.hasClick) PlaySfx(GAudio.click);
+                    state = GameState::MENU;
+                }
+            }
+            if (gToastT > 0)
+                DrawText(gToast.c_str(), sw / 2 - MeasureText(gToast.c_str(), 16) / 2, sh - 36, 16, YELLOW);
+        } else if (state == GameState::SCORES) {
+            DrawLooseCover("mainBg2.png", sw, sh);
+            int sti = AtlasNameIdx("TextImages", "mainMenu/scoresText.png");
+            if (sti >= 0) DrawAtlasTextC("TextImages", sti, (float)sw / 2.0f, 80, 40);
+            else DrawText("SCORES", sw / 2 - MeasureText("SCORES", 30) / 2, 60, 30, RAYWHITE);
+            int y = 150;
+            int totalBest = 0, totalClear = 0;
+            for (int st = 1; st <= 4; st++) {
+                int c = 0, b = 0;
+                for (size_t i = 0; i < GSelNodes.size(); i++) {
+                    if (GSelNodes[i].stage != st) continue;
+                    if (GPassed[GSelNodes[i].id]) c++;
+                    b += GBest[GSelNodes[i].id];
+                }
+                totalBest += b; totalClear += c;
+                char r[96];
+                snprintf(r, sizeof r, "STAGE %d  cleared %d   best %d", st, c, b);
+                DrawText(r, sw / 2 - MeasureText(r, 20) / 2, y, 20, RAYWHITE);
+                y += 40;
+            }
+            char t2[96];
+            snprintf(t2, sizeof t2, "TOTAL cleared %d/60   best %d", totalClear, totalBest);
+            DrawText(t2, sw / 2 - MeasureText(t2, 20) / 2, y + 10, 20, GOLD);
+            {
+                Rectangle rb = { (float)sw / 2 - 110, (float)y + 60, 220, 56 };
+                DrawRectangleRec(rb, Color{ 22, 22, 50, 220 });
+                DrawText("BACK", (int)rb.x + 70, (int)rb.y + 17, 24, WHITE);
+                if (TapIn(rb)) {
+                    if (GAudio.hasClick) PlaySfx(GAudio.click);
+                    state = GameState::MENU;
+                }
             }
         } else {
             BeginMode2D(cam);
@@ -1168,9 +1542,9 @@ int main() {
                 std::string texA = SuiteTexAtlas(ilev.suite), farA = SuiteFarAtlas(ilev.suite);
                 DrawRectangle(-60, -120, (int)levelW + 120, (int)levelH + 240, Color{ 24, 20, 60, 255 });
                 for (size_t i = 0; i < ilev.bac.size(); i++)
-                    DrawAtlasSprite(farA, ilev.bac[i].f, { ilev.bac[i].x, ilev.bac[i].y }, ilev.bac[i].r, ilev.bac[i].flip, WHITE);
+                    DrawAtlasSprite(farA, ilev.bac[i].f, { ilev.bac[i].x, ilev.bac[i].y }, ilev.bac[i].r, ilev.bac[i].flip, WHITE, ilev.bac[i].sx, ilev.bac[i].sy);
                 for (size_t i = 0; i < ilev.far.size(); i++)
-                    DrawAtlasSprite(farA, ilev.far[i].f, { ilev.far[i].x, ilev.far[i].y }, ilev.far[i].r, ilev.far[i].flip, WHITE);
+                    DrawAtlasSprite(farA, ilev.far[i].f, { ilev.far[i].x, ilev.far[i].y }, ilev.far[i].r, ilev.far[i].flip, WHITE, ilev.far[i].sx, ilev.far[i].sy);
                 for (size_t i = 0; i < ilev.tex.size(); i++)
                     DrawAtlasSprite(texA, ilev.tex[i].f, { ilev.tex[i].x, ilev.tex[i].y }, ilev.tex[i].r, ilev.tex[i].flip, WHITE);
                 for (size_t i = 0; i < ilev.items.size(); i++) {
@@ -1284,21 +1658,75 @@ int main() {
 
             if (state == GameState::PAUSED) {
                 DrawRectangle(0, 0, sw, sh, Color{ 0, 0, 0, 160 });
-                const char* t = "PAUSED — P resume, R restart, M menu";
-                DrawText(t, sw / 2 - MeasureText(t, 22) / 2, sh / 2, 22, RAYWHITE);
+                struct PBtn { const char* img; int act; };
+                PBtn pbs[] = {
+                    { "inGame/resumeText.png", 0 },
+                    { "inGame/restartText.png", 1 },
+                    { "inGame/quitText.png", 2 },
+                };
+                for (int i = 0; i < 3; i++) {
+                    Rectangle rb = { (float)sw / 2 - 130, (float)sh / 2 - 90 + (float)i * 66, 260, 54 };
+                    int bb = AtlasNameIdx("LevelSelect", "lvlSel/btnUp.png");
+                    if (bb >= 0) DrawAtlasStretched("LevelSelect", bb, rb);
+                    else DrawRectangleRec(rb, Color{ 30, 30, 60, 255 });
+                    int ti = AtlasNameIdx("TextImages", pbs[i].img);
+                    if (ti >= 0) DrawAtlasTextC("TextImages", ti, rb.x + rb.width / 2.0f, rb.y + 27, 20);
+                    if (TapIn(rb)) {
+                        if (GAudio.hasClick) PlaySfx(GAudio.click);
+                        if (pbs[i].act == 0) state = GameState::PLAYING;
+                        else if (pbs[i].act == 1) {
+                            if (useImport) startImport(importNo);
+                            else startRemake(remakeNo);
+                        } else {
+                            if (GAudio.hasStage) { StopMusicStream(GAudio.stage); GAudio.hasStage = false; }
+                            if (GAudio.hasMenu) MusicStart(GAudio.menu);
+                            state = packReady ? GameState::SELECT : GameState::MENU;
+                        }
+                    }
+                }
+            }
+            // tutorial overlay (original diagrams on Lv.1/2, first seconds)
+            if (state == GameState::PLAYING && useImport && !hasThrust && player.time < 12.0f
+                && (importNo == 1 || importNo == 2)) {
+                int bub = AtlasNameIdx("TutorialUI", "tutBubble.png");
+                int arr = AtlasNameIdx("TutorialUI", importNo == 1 ? "tutUp.png" : "tutDown.png");
+                int tch = AtlasNameIdx("TutorialUI", "tutCharStand.png");
+                float bw2 = 300.0f;
+                if ((float)sw - 40 < bw2) bw2 = (float)sw - 40;
+                float bh2 = bw2 * 317.0f / 286.0f;
+                float bx = ((float)sw - bw2) / 2.0f, by2 = (float)sh - bh2 - 120.0f;
+                if (bub >= 0) DrawAtlasStretched("TutorialUI", bub, { bx, by2, bw2, bh2 });
+                if (arr >= 0) DrawAtlasC("TutorialUI", arr, (float)sw / 2.0f, by2 + bh2 * 0.42f, 90, 90);
+                if (tch >= 0) DrawAtlasC("TutorialUI", tch, (float)sw / 2.0f, by2 + bh2 * 0.75f, 44, 58);
+                const char* h1 = importNo == 1 ? "TOUCH screen to fly!" : "Guide Kiana upward!";
+                DrawText(h1, sw / 2 - MeasureText(h1, 17) / 2, (int)(by2 + 18), 17, DARKBLUE);
+                const char* h2 = "LEFT = up-right   RIGHT = up-left";
+                DrawText(h2, sw / 2 - MeasureText(h2, 15) / 2, (int)(by2 + 42), 15, DARKGRAY);
             }
             if ((state == GameState::DEAD || state == GameState::WIN) && messageT > 0) {
                 int fs = (state == GameState::WIN) ? 44 : 26;
                 const char* t = (state == GameState::WIN) ? "MOON REACHED!" : message.c_str();
                 int w = MeasureText(t, fs);
                 DrawRectangle(sw / 2 - w / 2 - 20, sh / 3 - 16, w + 40, fs + 60, Color{ 0, 0, 0, 170 });
-                DrawText(t, sw / 2 - w / 2, sh / 3, fs, (state == GameState::WIN) ? GOLD : RED);
+                if (state == GameState::DEAD) {
+                    int fl = AtlasNameIdx("TextImages", "inGame/failedText.png");
+                    if (fl >= 0) DrawAtlasTextC("TextImages", fl, (float)sw / 2.0f, (float)sh / 3.0f + 13, 30);
+                    else DrawText(t, sw / 2 - w / 2, sh / 3, fs, RED);
+                } else DrawText(t, sw / 2 - w / 2, sh / 3, fs, GOLD);
                 if (state == GameState::WIN) {
                     char sb[96]; snprintf(sb, sizeof sb, "Score %d  %.1fs  Stars %d", score, player.time, player.stars);
                     Color cc = score >= 70000 ? MAGENTA : (score >= 60000 ? ORANGE : RAYWHITE);
                     DrawText(sb, sw / 2 - MeasureText(sb, 22) / 2, sh / 3 + 54, 22, cc);
+                    int tiers = score >= 70000 ? 3 : (score >= 60000 ? 2 : 1);
+                    int sids[] = {
+                        AtlasNameIdx("LevelSelect", "lvlSel/starUpY.png"),
+                        AtlasNameIdx("LevelSelect", "lvlSel/starUpO.png"),
+                        AtlasNameIdx("LevelSelect", "lvlSel/starUpP.png"),
+                    };
+                    for (int st = 0; st < tiers; st++)
+                        if (sids[st] >= 0) DrawAtlasC("LevelSelect", sids[st], (float)sw / 2.0f - 30.0f + (float)st * 30.0f, (float)sh / 3.0f + 96.0f, 28, 28);
                     const char* nx = "Tap / Space next  •  R replay  •  M menu";
-                    DrawText(nx, sw / 2 - MeasureText(nx, 16) / 2, sh / 3 + 84, 16, LIGHTGRAY);
+                    DrawText(nx, sw / 2 - MeasureText(nx, 16) / 2, sh / 3 + 118, 16, LIGHTGRAY);
                 } else {
                     const char* nx = "Tap / R retry  •  M menu";
                     DrawText(nx, sw / 2 - MeasureText(nx, 16) / 2, sh / 3 + 44, 16, LIGHTGRAY);

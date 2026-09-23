@@ -433,6 +433,7 @@
  "_notes": [
   "Sprite lookup is BY NAME (from binary format strings `%s_%03d%s`, `DynamicObject_%03d.png`): Layer SeqID N -> `{Prefix}_{N:03d}.png` in the suite atlas. f = 0-based frame index (-1 = missing, skipped at runtime).",
   "Background+Farground -> FargroundsS{suite}; Texture+Foreground -> TextureS{suite}; DynamicObject+Item -> DynamicObjectsLite.",
+  "Background/Farground layers use their own smaller design space: pos AND size scaled by (mapW/layerW, mapH/layerH), stored per-object as sx/sy.",
   "Background_001.png does not exist in any atlas (base sky fill) -> skipped, clear color shows.",
   "StaticObject SeqID = EdgeID; edge pts offset by obj pos; all Y flipped (cocos y-up -> y-down).",
   "moon = highest-Y DynamicObject (binary strings: moon in dynamicObjectLayer).",
